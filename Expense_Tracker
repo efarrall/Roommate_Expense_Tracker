@@ -13,6 +13,67 @@ const CONFIG = {
 };
 
 /**
+ * Add multiple rows at once for bulk operations
+ */
+function addMultipleRows(sheet, totalRow, numRows) {
+  try {
+    // Insert all rows first
+    for (let i = 0; i < numRows; i++) {
+      sheet.insertRowBefore(totalRow);
+    }
+    
+    // Now add content to each new row
+    for (let i = 0; i < numRows; i++) {
+      addNewItemRow(sheet, totalRow + i);
+    }
+    
+    // Update summary rows which are now at totalRow + numRows
+    updateSummaryRows(sheet, totalRow + numRows);
+  } catch (error) {
+    console.error('Error adding multiple rows:', error);
+  }
+}
+
+/**
+ * Improved addNewItemRow with explicit formatting
+ */
+function addNewItemRow(sheet, row) {
+  try {
+    console.log(`Adding new item row at row ${row}`);
+    
+    // Clear any existing formatting and content
+    const range = sheet.getRange(row, 1, 1, 10);
+    range.clearContent();
+    range.clearFormat();
+    
+    // Set basic formatting
+    sheet.getRange(row, 2).setNumberFormat('$#,##0.00'); // Cost column
+    sheet.getRange(row, 7, 1, 3).setNumberFormat('$#,##0.00'); // Individual cost columns
+    
+    // Add checkboxes for Taxable column
+    sheet.getRange(row, 3).insertCheckboxes();
+    
+    // Add checkboxes for each roommate
+    sheet.getRange(row, 4, 1, 3).insertCheckboxes();
+    
+    // Add checkbox for One Time Purchase
+    sheet.getRange(row, 10).insertCheckboxes();
+    
+    // Add formulas for individual costs
+    for (let i = 0; i < 3; i++) {
+      const formula = `=IF(${String.fromCharCode(68 + i)}${row}, IF(COUNTIF(D${row}:F${row}, TRUE)>0, B${row}/COUNTIF(D${row}:F${row}, TRUE), 0), 0)`;
+      console.log(`Setting formula in row ${row}, col ${7 + i}: ${formula}`);
+      sheet.getRange(row, 7 + i).setFormula(formula);
+    }
+    
+    console.log(`Successfully added new item row at row ${row}`);
+  } catch (error) {
+    console.error('Error adding new item row:', error);
+    console.error('Row:', row, 'Sheet:', sheet.getName());
+  }
+}
+
+/**
  * Creates menu items when the spreadsheet opens
  */
 function onOpen() {
@@ -119,32 +180,21 @@ function setupTemplate(sheet) {
 }
 
 /**
- * Adds a new item row with checkboxes
+ * Add rows if needed with better formatting control
  */
-function addNewItemRow(sheet, row) {
-  // Clear any existing formatting first
-  sheet.getRange(row, 1, 1, 10).clearFormat();
-  
-  // Add checkboxes for Taxable column
-  sheet.getRange(row, 3).insertCheckboxes();
-  
-  // Add checkboxes for each roommate
-  sheet.getRange(row, 4, 1, 3).insertCheckboxes();
-  
-  // Add checkbox for One Time Purchase
-  sheet.getRange(row, 10).insertCheckboxes();
-  
-  // Apply standard formatting
-  sheet.getRange(row, 2).setNumberFormat('$#,##0.00'); // Cost column
-  sheet.getRange(row, 7, 1, 3).setNumberFormat('$#,##0.00'); // Individual cost columns
-  
-  // Add formulas for individual costs
-  for (let i = 0; i < 3; i++) {
-    sheet.getRange(row, 7 + i).setFormula(
-      `=IF(${String.fromCharCode(68 + i)}${row}, IF(COUNTIF(D${row}:F${row}, TRUE)>0, B${row}/COUNTIF(D${row}:F${row}, TRUE), 0), 0)`
-    );
+function addRowsIfNeeded(sheet, totalRow) {
+  try {
+    // Insert row before the total row
+    sheet.insertRowBefore(totalRow);
+    // The new row is now at totalRow position, summary moves down
+    addNewItemRow(sheet, totalRow);
+    // Update summary rows which are now at totalRow + 1
+    updateSummaryRows(sheet, totalRow + 1);
+  } catch (error) {
+    console.error('Error adding rows:', error);
   }
 }
+
 
 /**
  * Updates or creates the summary rows
@@ -271,7 +321,7 @@ function updateSummaryRows(sheet, startRow) {
 }
 
 /**
- * Handles edit events - Installable trigger version
+ * Improved onEditTrigger with better handling for rapid edits
  */
 function onEditTrigger(e) {
   if (!e) return;
@@ -284,67 +334,101 @@ function onEditTrigger(e) {
   // Check if we're in a receipt sheet
   if (!sheet.getName().startsWith('Receipt_')) return;
   
-  // Find the total row
-  let totalRow = findTotalRow(sheet);
-  if (!totalRow) return;
+  // Use a lock to prevent concurrent execution
+  // const lock = LockService.getScriptLock();
+  // if (!lock.tryLock(100)) return; // Skip if can't get lock quickly
   
-  // Handle processed checkbox
-  if (col === 9 && range.getValue() === true) {
-    const values = sheet.getRange('A:A').getValues();
-    for (let i = 0; i < values.length; i++) {
-      if (values[i][0] === 'Paid') {
-        const paidRow = i + 1;
-        if (row === paidRow) {
-          processSheet(sheet, paidRow);
-          return;
+  try {
+    // Find the total row with better error handling
+    let totalRow = findTotalRow(sheet);
+    if (!totalRow) return;
+    
+    // Handle processed checkbox
+    if (col === 9 && range.getValue() === true) {
+      const values = sheet.getRange('A:A').getValues();
+      for (let i = 0; i < values.length; i++) {
+        if (values[i][0] === 'Paid') {
+          const paidRow = i + 1;
+          if (row === paidRow) {
+            processSheet(sheet, paidRow);
+            return;
+          }
         }
       }
     }
-  }
-  
-  // Handle item name entry for tax checking
-  if (col === 1 && row >= 2 && row < totalRow) {
-    const itemName = range.getValue();
     
-    // If near the last data row, add more rows
-    if (row >= totalRow - 2 && itemName) {
-      sheet.insertRowBefore(totalRow);
-      addNewItemRow(sheet, totalRow);
-      updateSummaryRows(sheet, totalRow + 1);
+    // Handle item name entry for tax checking
+    if (col === 1 && row >= 2 && row < totalRow) {
+      const itemName = range.getValue();
+      
+      console.log(`Item entered: "${itemName}" at row ${row}, totalRow is ${totalRow}`);
+      
+      // Count empty rows before total row
+      let emptyRows = 0;
+      for (let i = totalRow - 1; i >= 2; i--) {
+        const cellValue = sheet.getRange(i, 1).getValue();
+        if (!cellValue || cellValue.toString().trim() === '') {
+          emptyRows++;
+        } else {
+          break; // Stop at first non-empty row
+        }
+      }
+      
+      // If we have fewer than 2 empty rows, add more
+      if (emptyRows < 2 && itemName && itemName.toString().trim() !== '') {
+        console.log(`Adding new row because only ${emptyRows} empty rows available`);
+        addRowsIfNeeded(sheet, totalRow);
+        totalRow = findTotalRowImproved(sheet);
+      }
+      
+      // Check taxability with OpenAI (with delay to avoid rapid calls)
+      if (itemName && itemName.toString().trim() !== '') {
+        Utilities.sleep(200); // Small delay to batch rapid edits
+        checkTaxability(sheet, row, itemName);
+      }
     }
     
-    // Check taxability with OpenAI
-    if (itemName && itemName.trim() !== '') {
-      checkTaxability(sheet, row, itemName);
+    // Handle bulk paste in cost column with improved logic
+    if (col === 2 && range.getNumRows() > 1) {
+      const pastedRows = range.getNumRows();
+      const neededRow = row + pastedRows - 1;
+      
+      if (neededRow >= totalRow) {
+        addMultipleRows(sheet, totalRow, neededRow - totalRow + 2);
+      }
     }
-  }
-  
-  // Handle bulk paste in cost column
-  if (col === 2 && range.getNumRows() > 1) {
-    // Ensure we have enough rows for the paste
-    const pastedRows = range.getNumRows();
-    const neededRow = row + pastedRows - 1;
-    
-    while (neededRow >= totalRow) {
-      sheet.insertRowBefore(totalRow);
-      addNewItemRow(sheet, totalRow);
-      totalRow++;
-    }
-    updateSummaryRows(sheet, totalRow);
+  } finally {
+    lock.releaseLock();
   }
 }
 
 /**
- * Finds the row number containing "SUBTOTAL"
+ * Improved function to find total row with better error handling
  */
 function findTotalRow(sheet) {
-  const values = sheet.getRange('A:A').getValues();
-  for (let i = 0; i < values.length; i++) {
-    if (values[i][0] === 'SUBTOTAL') {
-      return i + 1;
+  try {
+    const values = sheet.getRange('A:A').getValues();
+    let totalRowCount = 0;
+    let lastTotalRow = null;
+    
+    for (let i = 0; i < values.length; i++) {
+      if (values[i][0] === 'SUBTOTAL') {
+        totalRowCount++;
+        lastTotalRow = i + 1;
+      }
     }
+    
+    // If we have multiple total rows, there's an issue
+    if (totalRowCount > 1) {
+      console.error(`Warning: Found ${totalRowCount} SUBTOTAL rows. Using last one: ${lastTotalRow}`);
+      // Could add cleanup logic here
+    }
+    
+    return lastTotalRow;
+  } catch (error) {
+    console.error('Error finding total row:', error);
+    return null;
   }
-  return null;
 }
 
 /**
