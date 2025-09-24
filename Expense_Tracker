@@ -1,0 +1,900 @@
+/**
+ * Google Apps Script for Roommate Expense Tracking Spreadsheet
+ * This script creates a template for tracking shared expenses with automatic tax calculation
+ * and OpenAI integration for determining taxable items.
+ */
+
+// Configuration - Replace with your actual roommate names and OpenAI API key
+const CONFIG = {
+  ROOMMATE_NAMES: ['Kelvin', 'Dylan', 'Eric'], // Replace with actual names
+  OPENAI_API_KEY: 'YOUR_OPENAI_API_KEY_HERE', // Replace with your OpenAI API key
+  PA_TAX_RATE: 0.06,
+  DISCOUNT_RATE: 0.10
+};
+
+/**
+ * Creates menu items when the spreadsheet opens
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('Expense Tracker')
+    .addItem('Create New Receipt Sheet', 'createNewReceiptSheet')
+    .addItem('Set OpenAI API Key', 'setApiKey')
+    .addItem('Show/Hide Processed Sheets', 'toggleProcessedSheets')
+    .addItem('Update Analysis Sheet', 'updateAnalysisSheet')
+    .addSeparator()
+    .addItem('Setup Triggers', 'setupTriggers')
+    .addItem('Help', 'showHelp')
+    .addToUi();
+}
+
+/**
+ * Sets up installable triggers for the spreadsheet
+ */
+function setupTriggers() {
+  // Remove existing triggers
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  
+  // Create new onEdit trigger
+  ScriptApp.newTrigger('onEditTrigger')
+    .forSpreadsheet(SpreadsheetApp.getActive())
+    .onEdit()
+    .create();
+    
+  SpreadsheetApp.getUi().alert('Triggers setup successfully! OpenAI integration is now active.');
+}
+
+/**
+ * Creates a new sheet with the expense tracking template
+ */
+function createNewReceiptSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = `Receipt_${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM-dd-yyyy_HH-mm')}`;
+  const sheet = ss.insertSheet(sheetName);
+  
+  // Move to beginning (after Analysis sheet if it exists)
+  const analysisSheet = ss.getSheetByName('Analysis');
+  if (analysisSheet) {
+    ss.moveActiveSheet(2);
+  } else {
+    ss.moveActiveSheet(1);
+  }
+  
+  setupTemplate(sheet);
+  
+  // Show success message
+  SpreadsheetApp.getUi().alert(`New receipt sheet "${sheetName}" created successfully!`);
+}
+
+/**
+ * Sets up the template structure on a given sheet
+ */
+function setupTemplate(sheet) {
+  // Clear any existing content
+  sheet.clear();
+  
+  // Set up headers - now with 10 columns
+  const headers = [
+    'Item',
+    'Cost',
+    'Taxable',
+    CONFIG.ROOMMATE_NAMES[0],
+    CONFIG.ROOMMATE_NAMES[1],
+    CONFIG.ROOMMATE_NAMES[2],
+    `${CONFIG.ROOMMATE_NAMES[0]} Cost`,
+    `${CONFIG.ROOMMATE_NAMES[1]} Cost`,
+    `${CONFIG.ROOMMATE_NAMES[2]} Cost`,
+    'One Time Purchase'
+  ];
+  
+  // Set headers
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  sheet.getRange(1, 1, 1, headers.length).setBackground('#E8E8E8');
+  
+  // Format columns
+  sheet.getRange('B:B').setNumberFormat('$#,##0.00'); // Cost column
+  sheet.getRange('G:I').setNumberFormat('$#,##0.00'); // Individual cost columns
+  
+  // Set column widths
+  sheet.setColumnWidth(1, 200); // Item column
+  sheet.setColumnWidth(2, 80);  // Cost column
+  sheet.setColumnWidth(3, 70);  // Taxable column
+  sheet.setColumnWidths(4, 3, 80); // Roommate checkboxes
+  sheet.setColumnWidths(7, 3, 100); // Individual costs
+  sheet.setColumnWidth(10, 120); // One Time Purchase column
+  
+  // Add 5 initial data rows with checkboxes for easier bulk pasting
+  const starting_rows = 4;
+  for (let i = 2; i <= starting_rows+1; i++) {
+    addNewItemRow(sheet, i);
+  }
+  
+  // Add Total, Tax, Discount, Date, and Processing rows
+  updateSummaryRows(sheet, starting_rows+2);
+  
+  // Create or update Analysis sheet
+  createOrUpdateAnalysisSheet();
+}
+
+/**
+ * Adds a new item row with checkboxes
+ */
+function addNewItemRow(sheet, row) {
+  // Clear any existing formatting first
+  sheet.getRange(row, 1, 1, 10).clearFormat();
+  
+  // Add checkboxes for Taxable column
+  sheet.getRange(row, 3).insertCheckboxes();
+  
+  // Add checkboxes for each roommate
+  sheet.getRange(row, 4, 1, 3).insertCheckboxes();
+  
+  // Add checkbox for One Time Purchase
+  sheet.getRange(row, 10).insertCheckboxes();
+  
+  // Apply standard formatting
+  sheet.getRange(row, 2).setNumberFormat('$#,##0.00'); // Cost column
+  sheet.getRange(row, 7, 1, 3).setNumberFormat('$#,##0.00'); // Individual cost columns
+  
+  // Add formulas for individual costs
+  for (let i = 0; i < 3; i++) {
+    sheet.getRange(row, 7 + i).setFormula(
+      `=IF(${String.fromCharCode(68 + i)}${row}, IF(COUNTIF(D${row}:F${row}, TRUE)>0, B${row}/COUNTIF(D${row}:F${row}, TRUE), 0), 0)`
+    );
+  }
+}
+
+/**
+ * Updates or creates the summary rows
+ */
+function updateSummaryRows(sheet, startRow) {
+  const lastDataRow = startRow - 1;
+  const discountCell = 'B' + (startRow + 2);
+  
+  // Subtotal row
+  sheet.getRange(startRow, 1).setValue('SUBTOTAL');
+  sheet.getRange(startRow, 1).setFontWeight('bold');
+  sheet.getRange(startRow, 2).setFormula(`=SUM(B2:B${lastDataRow})`);
+  sheet.getRange(startRow, 2).setFontWeight('bold');
+  
+  // Add discounted total in a separate location (like column D)
+  sheet.getRange(startRow, 4).setValue('Discounted Total');
+  sheet.getRange(startRow, 5).setFormula(`=IF(${discountCell}, B${startRow}*${1-CONFIG.DISCOUNT_RATE}, B${startRow})`);
+  
+  // Individual subtotals
+  for (let i = 0; i < 3; i++) {
+    const col = 7 + i;
+    const subtotal = `SUM(${String.fromCharCode(71 + i)}2:${String.fromCharCode(71 + i)}${lastDataRow})`;
+    const discountCell = 'B' + (startRow + 2);
+    
+    let formula = `=IF(${discountCell}, ${subtotal}*${1-CONFIG.DISCOUNT_RATE}, ${subtotal})`;
+    
+    sheet.getRange(startRow, col).setFormula(formula);
+    sheet.getRange(startRow, col).setFontWeight('bold');
+    sheet.getRange(startRow, col).setNumberFormat('$#,##0.00');
+  }
+  
+  // Tax row
+  const taxRow = startRow + 1;
+  sheet.getRange(taxRow, 1).setValue('TAX');
+  sheet.getRange(taxRow, 1).setFontWeight('bold');
+  sheet.getRange(taxRow, 2).setBackground('#FFF2CC');
+  sheet.getRange(taxRow, 2).setNumberFormat('$#,##0.00');
+
+  // Add calculated tax in column 3
+  sheet.getRange(taxRow, 3).setValue('Calculated Tax');
+  sheet.getRange(taxRow, 3).setFontWeight('bold');
+
+  const calculatedTaxFormula = `SUMIF(C2:C${lastDataRow}, TRUE, B2:B${lastDataRow})*${CONFIG.PA_TAX_RATE}`;
+  const discountedTaxFormula = `=IF(${discountCell}, ${calculatedTaxFormula}*${1-CONFIG.DISCOUNT_RATE}, ${calculatedTaxFormula})`;
+
+  sheet.getRange(taxRow, 4).setFormula(discountedTaxFormula);
+  sheet.getRange(taxRow, 4).setNumberFormat('$#,##0.00');
+  sheet.getRange(taxRow, 4).setBackground('#E8F5E9');
+  
+  // Individual tax calculations with discount
+  for (let i = 0; i < 3; i++) {
+    const col = 7 + i;
+    const checkboxCol = String.fromCharCode(68 + i);
+    const costCol = String.fromCharCode(71 + i);
+    const discountCell = 'B' + (startRow + 2);
+    
+    let taxFormula = `SUMPRODUCT((C2:C${lastDataRow})*(${checkboxCol}2:${checkboxCol}${lastDataRow})*(${costCol}2:${costCol}${lastDataRow})*${CONFIG.PA_TAX_RATE})`;
+    let formula = `=IF(${discountCell}, ${taxFormula}*${1-CONFIG.DISCOUNT_RATE}, ${taxFormula})`;
+    
+    sheet.getRange(taxRow, col).setFormula(formula);
+    sheet.getRange(taxRow, col).setNumberFormat('$#,##0.00');
+    sheet.getRange(taxRow, col).setFontWeight('bold');
+  }
+  
+  // Discount row
+  const discountRow = startRow + 2;
+  sheet.getRange(discountRow, 1).setValue('Apply Discount (10%)');
+  sheet.getRange(discountRow, 1).setFontWeight('bold');
+  sheet.getRange(discountRow, 2).insertCheckboxes();
+  
+  // Final total row (subtotal + tax)
+  const finalRow = startRow + 3;
+  sheet.getRange(finalRow, 1).setValue('TOTAL');
+  sheet.getRange(finalRow, 1).setFontWeight('bold');
+  sheet.getRange(finalRow, 1).setBackground('#D5E8D4');
+  
+  for (let i = 0; i < 3; i++) {
+    const col = 7 + i;
+    const subtotal = String.fromCharCode(71 + i) + startRow;
+    const tax = String.fromCharCode(71 + i) + taxRow;
+    
+    let formula = `=${subtotal}+${tax}`;
+    
+    sheet.getRange(finalRow, col).setFormula(formula);
+    sheet.getRange(finalRow, col).setNumberFormat('$#,##0.00');
+    sheet.getRange(finalRow, col).setFontWeight('bold');
+    sheet.getRange(finalRow, col).setBackground('#D5E8D4');
+  }
+  
+  // Date row
+  const dateRow = startRow + 4;
+  sheet.getRange(dateRow, 1).setValue('Date');
+  sheet.getRange(dateRow, 1).setFontWeight('bold');
+  sheet.getRange(dateRow, 2).setBackground('#FFF2CC');
+  sheet.getRange(dateRow, 2).setNumberFormat('mm-dd-yyyy');
+
+  // Payee row (who paid the receipt)
+  const payeeRow = startRow + 6;
+  sheet.getRange(payeeRow, 1).setValue('Payee (who paid)');
+  sheet.getRange(payeeRow, 1).setFontWeight('bold');
+
+  // Add payee checkboxes under each person's column
+  for (let i = 0; i < 3; i++) {
+    sheet.getRange(payeeRow, 4 + i).insertCheckboxes();
+  }
+  
+  // Processing row - Paid checkboxes
+  const processingRow = startRow + 5;
+  sheet.getRange(processingRow, 1).setValue('Paid');
+  sheet.getRange(processingRow, 1).setFontWeight('bold');
+  
+  // Add paid checkboxes under each person's column
+  for (let i = 0; i < 3; i++) {
+    sheet.getRange(processingRow, 4 + i).insertCheckboxes();
+  }
+  
+  // Processed checkbox
+  sheet.getRange(processingRow, 8).setValue('Processed');
+  sheet.getRange(processingRow, 8).setFontWeight('bold');
+  sheet.getRange(processingRow, 9).insertCheckboxes();
+  
+  // Add borders
+  sheet.getRange(startRow, 1, 7, 10).setBorder(true, true, true, true, false, false);
+}
+
+/**
+ * Handles edit events - Installable trigger version
+ */
+function onEditTrigger(e) {
+  if (!e) return;
+  
+  const sheet = e.source.getActiveSheet();
+  const range = e.range;
+  const row = range.getRow();
+  const col = range.getColumn();
+  
+  // Check if we're in a receipt sheet
+  if (!sheet.getName().startsWith('Receipt_')) return;
+  
+  // Find the total row
+  let totalRow = findTotalRow(sheet);
+  if (!totalRow) return;
+  
+  // Handle processed checkbox
+  if (col === 9 && range.getValue() === true) {
+    const values = sheet.getRange('A:A').getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (values[i][0] === 'Paid') {
+        const paidRow = i + 1;
+        if (row === paidRow) {
+          processSheet(sheet, paidRow);
+          return;
+        }
+      }
+    }
+  }
+  
+  // Handle item name entry for tax checking
+  if (col === 1 && row >= 2 && row < totalRow) {
+    const itemName = range.getValue();
+    
+    // If near the last data row, add more rows
+    if (row >= totalRow - 2 && itemName) {
+      sheet.insertRowBefore(totalRow);
+      addNewItemRow(sheet, totalRow);
+      updateSummaryRows(sheet, totalRow + 1);
+    }
+    
+    // Check taxability with OpenAI
+    if (itemName && itemName.trim() !== '') {
+      checkTaxability(sheet, row, itemName);
+    }
+  }
+  
+  // Handle bulk paste in cost column
+  if (col === 2 && range.getNumRows() > 1) {
+    // Ensure we have enough rows for the paste
+    const pastedRows = range.getNumRows();
+    const neededRow = row + pastedRows - 1;
+    
+    while (neededRow >= totalRow) {
+      sheet.insertRowBefore(totalRow);
+      addNewItemRow(sheet, totalRow);
+      totalRow++;
+    }
+    updateSummaryRows(sheet, totalRow);
+  }
+}
+
+/**
+ * Finds the row number containing "SUBTOTAL"
+ */
+function findTotalRow(sheet) {
+  const values = sheet.getRange('A:A').getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i][0] === 'SUBTOTAL') {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Processes a sheet when marked as processed
+ */
+function processSheet(sheet, paidRow) {
+  // Check all paid checkboxes
+  for (let i = 0; i < 3; i++) {
+    sheet.getRange(paidRow, 4 + i).setValue(true);
+  }
+  
+  // Hide the sheet
+  sheet.hideSheet();
+  
+  // Update analysis
+  updateAnalysisSheet();
+  
+  SpreadsheetApp.getUi().alert('Sheet processed and hidden. Use "Show/Hide Processed Sheets" to view.');
+}
+
+/**
+ * Toggles visibility of processed sheets
+ */
+function toggleProcessedSheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  let hiddenCount = 0;
+  let shownCount = 0;
+  
+  sheets.forEach(sheet => {
+    if (sheet.getName().startsWith('Receipt_')) {
+      if (sheet.isSheetHidden()) {
+        sheet.showSheet();
+        shownCount++;
+      } else {
+        // Check if it's processed
+        const values = sheet.getRange('A:A').getValues();
+        for (let i = 0; i < values.length; i++) {
+          if (values[i][0] === 'Paid') {
+            const processedValue = sheet.getRange(i + 1, 9).getValue();
+            if (processedValue === true) {
+              sheet.hideSheet();
+              hiddenCount++;
+            }
+            break;
+          }
+        }
+      }
+    }
+  });
+  
+  const message = hiddenCount > 0 ? 
+    `Hidden ${hiddenCount} processed sheets.` : 
+    `Shown ${shownCount} previously hidden sheets.`;
+  
+  SpreadsheetApp.getUi().alert(message);
+}
+
+/**
+ * Checks if an item is taxable using OpenAI API
+ */
+function checkTaxability(sheet, row, itemName) {
+  try {
+    const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY') || CONFIG.OPENAI_API_KEY;
+    
+    if (!apiKey || apiKey === 'YOUR_OPENAI_API_KEY_HERE') {
+      console.log('OpenAI API key not configured');
+      return;
+    }
+    
+    const url = 'https://api.openai.com/v1/chat/completions';
+    
+    const payload = {
+      model: 'gpt-4o-mini-2024-07-18', // Using the correct model name
+      messages: [
+        {
+          role: 'system',
+          content: `You are a Pennsylvania tax expert. Determine if grocery items are taxable in PA.
+                   Most unprepared food and beverages are NOT taxable in PA.
+                   Taxable items include: prepared/hot foods, candy, soft drinks, dietary supplements, pet food, paper products, cleaning supplies, personal care items, household items, electronics.
+                   Non-taxable items include: most groceries, unprepared food, milk, juice, bread, produce, meat, eggs, etc.
+                   Respond with only "true" if taxable or "false" if not taxable.`
+        },
+        {
+          role: 'user',
+          content: `Is this item taxable in Pennsylvania: ${itemName}`
+        }
+      ],
+      temperature: 0.1,
+      max_tokens: 10
+    };
+    
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+    
+    if (json.choices && json.choices[0] && json.choices[0].message) {
+      const isTaxable = json.choices[0].message.content.toLowerCase().includes('true');
+      sheet.getRange(row, 3).setValue(isTaxable);
+      console.log(`Checked taxability for "${itemName}": ${isTaxable}`);
+    }
+  } catch (error) {
+    console.error('Error checking taxability:', error);
+  }
+}
+
+/**
+ * Creates or updates the Analysis sheet
+ */
+function createOrUpdateAnalysisSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let analysisSheet = ss.getSheetByName('Analysis');
+  
+  if (!analysisSheet) {
+    analysisSheet = ss.insertSheet('Analysis', 0);
+  }
+  
+  updateAnalysisSheet();
+}
+
+/**
+ * Updates the Analysis sheet with current data
+ */
+function updateAnalysisSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let analysisSheet = ss.getSheetByName('Analysis');
+  
+  if (!analysisSheet) {
+    analysisSheet = ss.insertSheet('Analysis', 0);
+  }
+  
+  analysisSheet.clear();
+  
+  // Title
+  analysisSheet.getRange('A1').setValue('Expense Analysis Dashboard');
+  analysisSheet.getRange('A1').setFontSize(16).setFontWeight('bold');
+  
+  // Cost breakdown section
+  analysisSheet.getRange('A3').setValue('Total Cost Breakdown (After Discounts)');
+  analysisSheet.getRange('A3').setFontSize(14).setFontWeight('bold');
+  
+  // Headers for breakdown
+  const headers = ['Person', 'Total Due', 'Paid', 'Outstanding', 'Owes To'];
+  analysisSheet.getRange('A5:E5').setValues([headers]);
+  analysisSheet.getRange('A5:E5').setFontWeight('bold').setBackground('#E8E8E8');
+  
+  // Calculate totals
+  const sheets = ss.getSheets();
+  const totals = {};
+  const paid = {};
+  const owes = {}; // Track who owes money to whom
+  const weeklyData = [];
+
+  // Initialize totals
+  CONFIG.ROOMMATE_NAMES.forEach(name => {
+    totals[name] = 0;
+    paid[name] = 0;
+    owes[name] = {};
+    CONFIG.ROOMMATE_NAMES.forEach(otherName => {
+      if (name !== otherName) {
+        owes[name][otherName] = 0;
+      }
+    });
+  });
+  
+  // Process each receipt sheet
+  sheets.forEach(sheet => {
+    if (!sheet.getName().startsWith('Receipt_')) return;
+    
+    const totalRow = findTotalRow(sheet);
+    if (!totalRow) return;
+    
+    // Get date
+    let receiptDate = null;
+    const dateValues = sheet.getRange('A:B').getValues();
+    for (let i = 0; i < dateValues.length; i++) {
+      if (dateValues[i][0] === 'Date' && dateValues[i][1]) {
+        receiptDate = parseDate(dateValues[i][1]);
+        break;
+      }
+    }
+    
+// Get final totals, payment status, and payee
+let payeeIndex = -1;
+const allValues = sheet.getRange('A:I').getValues();
+
+// Find who paid (payee)
+for (let j = 0; j < allValues.length; j++) {
+  if (allValues[j][0] === 'Payee (who paid)') {
+    for (let k = 0; k < 3; k++) {
+      if (allValues[j][3 + k] === true) {
+        payeeIndex = k;
+        break;
+      }
+    }
+    break;
+  }
+}
+
+  // Get final totals and payment status
+  for (let i = 0; i < 3; i++) {
+    const name = CONFIG.ROOMMATE_NAMES[i];
+    // Look for TOTAL row (should be 3 rows after totalRow)
+    const finalTotal = sheet.getRange(totalRow + 3, 7 + i).getValue();
+    
+    // Check if paid
+    for (let j = 0; j < allValues.length; j++) {
+      if (allValues[j][0] === 'Paid') {
+        const isPaid = allValues[j][3 + i];
+        
+        totals[name] += finalTotal || 0;
+        if (isPaid) {
+          paid[name] += finalTotal || 0;
+        } else if (payeeIndex >= 0 && i !== payeeIndex && finalTotal > 0) {
+          // This person owes money to the payee
+          const payeeName = CONFIG.ROOMMATE_NAMES[payeeIndex];
+          owes[name][payeeName] += finalTotal;
+        }
+        break;
+      }
+    }
+  } 
+
+  for (let i = 0; i < 3; i++) {
+    const name1 = CONFIG.ROOMMATE_NAMES[(i+1)%3]
+    const name2 = CONFIG.ROOMMATE_NAMES[(i+2)%3]
+    let temp1 = owes[name1][name2];
+    let temp2 = owes[name2][name1];
+
+    if (temp1 > 0 && temp2 > 0) {
+      if (temp1 > temp2) {
+        temp1 -= temp2;
+        temp2 = 0;
+      } else {
+        temp2 -= temp1;
+        temp1 = 0;
+      }
+    }
+
+    // Store back updated values
+    owes[name1][name2] = temp1;
+    owes[name2][name1] = temp2;
+  }
+
+    // Collect data for graphs (using final totals)
+    if (receiptDate) {
+      const itemData = sheet.getRange(2, 1, totalRow - 2, 10).getValues();
+      const discountApplied = getDiscountStatus(sheet, totalRow);
+      
+      weeklyData.push({
+        date: receiptDate,
+        sheet: sheet.getName(),
+        items: itemData,
+        discountApplied: discountApplied
+      });
+    }
+  });
+  
+  // Display totals
+  let row = 6;
+  CONFIG.ROOMMATE_NAMES.forEach(name => {
+    // Create owes string
+    const owesStrings = [];
+    Object.keys(owes[name]).forEach(creditor => {
+      if (owes[name][creditor] > 0) {
+        owesStrings.push(`${creditor}: $${owes[name][creditor].toFixed(2)}`);
+      }
+    });
+    const owesText = owesStrings.length > 0 ? owesStrings.join(', ') : 'Nobody';
+    
+    analysisSheet.getRange(row, 1, 1, 5).setValues([[
+      name,
+      totals[name],
+      paid[name],
+      totals[name] - paid[name],
+      owesText
+    ]]);
+    row++;
+  });
+  
+  // Add total row
+  const totalDue = Object.values(totals).reduce((a, b) => a + b, 0);
+  const totalPaid = Object.values(paid).reduce((a, b) => a + b, 0);
+  
+  analysisSheet.getRange(row, 1, 1, 5).setValues([[
+    'TOTAL',
+    totalDue,
+    totalPaid,
+    totalDue - totalPaid,
+    '-'
+  ]]);
+  analysisSheet.getRange(row, 1, 1, 5).setFontWeight('bold').setBackground('#D5E8D4');
+  
+  // Format currency
+  analysisSheet.getRange(6, 2, CONFIG.ROOMMATE_NAMES.length + 1, 3).setNumberFormat('$#,##0.00');
+  
+  // Add weekly spending analysis
+  if (weeklyData.length > 0) {
+    createWeeklyGraphs(analysisSheet, weeklyData);
+  }
+  
+  // Auto-resize columns
+  analysisSheet.autoResizeColumns(1, 5);
+}
+
+/**
+ * Gets the discount status for a receipt sheet
+ */
+function getDiscountStatus(sheet, totalRow) {
+  try {
+    // Discount checkbox should be at totalRow + 2, column 2
+    const discountValue = sheet.getRange(totalRow + 2, 2).getValue();
+    return discountValue === true;
+  } catch (e) {
+    console.error('Error getting discount status:', e);
+    return false;
+  }
+}
+
+/**
+ * Parses date in format MM-DD-YY
+ */
+function parseDate(dateValue) {
+  if (!dateValue) return null;
+  
+  try {
+    if (dateValue instanceof Date) {
+      return dateValue;
+    }
+    
+    const dateStr = dateValue.toString();
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      let month = parseInt(parts[0], 10) - 1; // JS months are 0-based
+      let day = parseInt(parts[1], 10);
+      let year = parseInt(parts[2], 10);
+      
+      // Handle 2-digit year
+      if (year < 100) {
+        year += (year < 50 ? 2000 : 1900); 
+        // "25" → 2025, "75" → 1975
+      }
+      
+      return new Date(year, month, day);
+    }
+  } catch (e) {
+    console.error('Error parsing date:', e);
+  }
+  
+  return null;
+}
+
+
+/**
+ * Creates weekly spending graphs
+ */
+function createWeeklyGraphs(sheet, weeklyData) {
+  // Group data by week
+  const weeklyTotals = {};
+  const weeklyByPerson = {};
+  
+  weeklyData.forEach(receipt => {
+    if (!receipt.date) return;
+    
+    // Get week start (Sunday)
+    const weekStart = new Date(receipt.date);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    const weekKey = weekStart.toISOString().split('T')[0];
+    
+    if (!weeklyTotals[weekKey]) {
+      weeklyTotals[weekKey] = {
+        total: 0,
+        oneTime: 0,
+        regular: 0
+      };
+      CONFIG.ROOMMATE_NAMES.forEach(name => {
+        if (!weeklyByPerson[name]) weeklyByPerson[name] = {};
+        weeklyByPerson[name][weekKey] = {
+          total: 0,
+          oneTime: 0,
+          regular: 0
+        };
+      });
+    }
+    
+    // Calculate discount multiplier
+    const discountMultiplier = receipt.discountApplied ? (1 - CONFIG.DISCOUNT_RATE) : 1;
+    
+    // Process items with discount applied
+    receipt.items.forEach((item, idx) => {
+      let cost = (item[1] || 0) * discountMultiplier; // Apply discount to base cost
+      const isOneTime = item[9] || false; // One Time Purchase column
+      
+      weeklyTotals[weekKey].total += cost;
+      if (isOneTime) {
+        weeklyTotals[weekKey].oneTime += cost;
+      } else {
+        weeklyTotals[weekKey].regular += cost;
+      }
+      
+      // Calculate per person
+      for (let i = 0; i < 3; i++) {
+        const name = CONFIG.ROOMMATE_NAMES[i];
+        if (item[3 + i]) { // If person checked
+          let personCost = cost / countChecked(item, 3, 6);
+          
+          // Add tax if applicable
+          if (item[2]) { // If taxable
+            const tax = personCost * CONFIG.PA_TAX_RATE * discountMultiplier;
+            personCost += tax;
+          }
+          
+          weeklyByPerson[name][weekKey].total += personCost;
+          if (isOneTime) {
+            weeklyByPerson[name][weekKey].oneTime += personCost;
+          } else {
+            weeklyByPerson[name][weekKey].regular += personCost;
+          }
+        }
+      }
+    });
+  });
+  
+  // Display summary data in table format
+  displayWeeklySummary(sheet, weeklyTotals, weeklyByPerson);
+}
+
+/**
+ * Counts checked boxes in a row
+ */
+function countChecked(row, startCol, endCol) {
+  let count = 0;
+  for (let i = startCol; i < endCol; i++) {
+    if (row[i]) count++;
+  }
+  return Math.max(count, 1);
+}
+
+/**
+ * Displays weekly summary in table format
+ */
+function displayWeeklySummary(sheet, weeklyTotals, weeklyByPerson) {
+  const startRow = 13;
+  
+  sheet.getRange(startRow, 1).setValue('Weekly Spending Summary (Final Totals After Discounts)');
+  sheet.getRange(startRow, 1).setFontSize(14).setFontWeight('bold');
+  
+  // Create headers
+  const headers = ['Week Starting', 'Total', 'One-Time', 'Regular'];
+  CONFIG.ROOMMATE_NAMES.forEach(name => {
+    headers.push(`${name} Total`);
+    headers.push(`${name} One-Time`);
+    headers.push(`${name} Regular`);
+  });
+  
+  sheet.getRange(startRow + 2, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(startRow + 2, 1, 1, headers.length).setFontWeight('bold').setBackground('#E8E8E8');
+  
+  // Sort weeks and display data
+  const weeks = Object.keys(weeklyTotals).sort();
+  const data = weeks.map(week => {
+    const weekDate = new Date(week);
+    const row = [
+      Utilities.formatDate(weekDate, Session.getScriptTimeZone(), 'MM/dd/yyyy'),
+      weeklyTotals[week].total,
+      weeklyTotals[week].oneTime,
+      weeklyTotals[week].regular
+    ];
+    
+    CONFIG.ROOMMATE_NAMES.forEach(name => {
+      const personData = weeklyByPerson[name][week] || {total: 0, oneTime: 0, regular: 0};
+      row.push(personData.total, personData.oneTime, personData.regular);
+    });
+    
+    return row;
+  });
+  
+  if (data.length > 0) {
+    sheet.getRange(startRow + 3, 1, data.length, headers.length).setValues(data);
+    sheet.getRange(startRow + 3, 2, data.length, headers.length - 1).setNumberFormat('$#,##0.00');
+  }
+  
+  // Auto-resize columns
+  sheet.autoResizeColumns(1, headers.length);
+}
+
+/**
+ * Sets the OpenAI API key
+ */
+function setApiKey() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Set OpenAI API Key',
+    'Enter your OpenAI API key:',
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() === ui.Button.OK) {
+    const apiKey = response.getResponseText();
+    PropertiesService.getScriptProperties().setProperty('OPENAI_API_KEY', apiKey);
+    ui.alert('API Key saved successfully! Remember to run "Setup Triggers" to activate OpenAI integration.');
+  }
+}
+
+/**
+ * Shows help information
+ */
+function showHelp() {
+  const ui = SpreadsheetApp.getUi();
+  const helpText = `
+Roommate Expense Tracker Help:
+
+SETUP:
+1. Run "Expense Tracker > Setup Triggers" to enable OpenAI integration
+2. Set your OpenAI API key via "Set OpenAI API Key"
+
+USAGE:
+1. Create new receipts with "Create New Receipt Sheet"
+2. Enter items and costs (you can paste multiple items at once)
+3. Check boxes for who uses what
+4. Enter receipt date in MM-DD-YYYY format
+5. Mark items as "One Time Purchase" if applicable
+6. Apply discount checkbox if receipt shows discount applied
+7. Mark as "Paid" when roommates pay
+8. Check "Processed" to archive the sheet
+
+FEATURES:
+- Automatic tax detection via OpenAI
+- Discount applies to both subtotals and taxes
+- Weekly spending analysis
+- Processed sheets can be hidden/shown
+- Bulk paste support for items and costs
+
+DISCOUNT FEATURE:
+- When discount is applied, it reduces both the subtotal AND tax by 10%
+- Use this when your receipt already shows discounted prices
+- All analysis uses these final totals
+
+Note: The sheet automatically adds new rows as you enter data.
+`;
+  
+  ui.alert('Help', helpText, ui.ButtonSet.OK);
+}
